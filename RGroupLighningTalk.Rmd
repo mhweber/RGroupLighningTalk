@@ -1,0 +1,153 @@
+---
+title: "Quick Mapping Lightning Talk"
+author: "Marc Weber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Setup
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(sf)
+library(readr)
+library(mapview)
+library(Rspatialworkshop)
+library(ggplot2)
+library(leaflet)
+library(httr)
+```
+
+## Get flat data with coordinates
+Use `read_csv` from`readr` package to load a .csv file I keep as part of a spatial data package that you can install with:
+```
+library(devtools)
+install_github("mhweber/Rspatialworkshop")
+library(Rspatialworkshop)
+```
+Then we:
+
+1. Read in the csv
+2. Suppress showing column types
+3. Select a subset of numerous attributes
+4. Filter a small portion of the 2700 gages in the dataset by filtering only gages with drainage areas > 500 sq miles
+```{r, warning=FALSE}
+gages <- read_csv(system.file("extdata/Gages_flowdata.csv", package = "Rspatialworkshop"),show_col_types = FALSE) %>% dplyr::select(ID=SOURCE_FEA,LON_SITE,LAT_SITE, MeanFlowCFS=AVE, DrainAreaSqMiles=DA_SQ_MILE) %>% 
+  dplyr::filter(DrainAreaSqMiles > 500)
+glimpse(gages)
+```
+
+## Make our data spatial
+
+- We use `st_as_sf` from the `sf` package to promote the data to a `simple feature collection` by:
+    + passing the longitude and lattitude fields from our data to use 
+    + providing a coordinate reference system - we specify this using an `epsg` code
+    + Our `epsg` code is for unprojected NAD83
+    + We can find coordinate reference systems (CRS) easily from [spatialreference.org](spatialreference.org)
+```{r}
+gages <- st_as_sf(gages, coords = c("LON_SITE", "LAT_SITE"), crs = 4269, remove = FALSE)
+ggplot() + geom_sf(data=gages)
+```
+
+## A simple interactive map using `mapview`
+```{r}
+mapview(gages)
+```
+
+## Customize mapview
+
+- Change the background
+- Scale the symbol size by flow rate
+```{r}
+m <- mapview(gages, map.types = c("Esri.WorldShadedRelief", "OpenStreetMap"), color = "grey40",cex = "MeanFlowCFS")
+m
+```
+
+## Add Web Map Service (WMS) Layers!
+[Web Map Services](https://en.wikipedia.org/wiki/Web_Map_Service) provide pre-rendered map tiles at different scales and are useful as background map layers. Here is my original [Stack Overflow question](https://stackoverflow.com/questions/32960050/loading-wms-layer-in-r-leaflet-using-addwmstiles) from when I first played with adding WMS layers with `mapview` and `leaflet`
+
+### NHD WMS from the National Map
+Here we display a background of National Hydrography Dataset stream lines to go with our gages without having to load local files.
+
+This is a super handy way to share your data in an interactive map mashed up with relevant background layers in one file in R, without having to share spatial files.
+```{r}
+m <- mapview(gages, cex = "MeanFlowCFS")
+# Define the NHD WMS service
+wms_nhd <- "https://hydro.nationalmap.gov:443/arcgis/services/nhd/MapServer/WmsServer?"
+m@map <- m@map %>% 
+  addWMSTiles(group = 'USGS HydroCache',
+              wms_nhd,layers  = 6,
+              options = WMSTileOptions(format = "image/png", transparent = TRUE),
+              attribution = "")  %>% mapview:::mapViewLayersControl(names = "NHD")
+
+m
+```
+
+### Other WMS Services
+We can see other services available on the National Map [here](https://apps.nationalmap.gov/services/) - let's try transportation
+```{r}
+# Define the WMS service
+m <- mapview(gages, cex = "MeanFlowCFS")
+wms_trails <- "https://carto.nationalmap.gov:443/arcgis/services/transportation/MapServer/WmsServer?"
+m@map <- m@map %>% 
+  addWMSTiles(group = 'Trails',
+              wms_trails,layers  = 3,
+              options = WMSTileOptions(format = "image/png", transparent = TRUE),
+              attribution = "")  %>% 
+  addWMSTiles(group = 'Trail Labels',
+              wms_trails,layers  = 15,
+              options = WMSTileOptions(format = "image/png", transparent = TRUE),
+              attribution = "") %>%  mapview:::mapViewLayersControl(names = c("Trails","Trail Names"))
+                                  
+m
+```
+
+## Querying and making spatial Web Feature Services (WFS)
+Just to show scope of different things we can do linking to REST Services as well - here are links to a couple examples-
+[spatial wfs services](https://inbo.github.io/tutorials/tutorials/spatial_wfs_services/) and 
+[accessing arcgis rest services](https://community.esri.com/t5/gis-blog/accessing-arcgis-rest-services-using-r/ba-p/898451)
+
+And we can also use REST services for the same WMS layers we displayed in maps above!
+See [National Map Services page](https://apps.nationalmap.gov/services/)
+
+We can get a listing of all ESRI REST services [here](https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services)
+
+### Query water bodies REST feature
+```{r}
+url <- parse_url("https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services")
+url$path <- paste(url$path, "USA_Water_Bodies/FeatureServer/0/query", sep = "/")
+url$query <- list(where = "STATE = 'OR'",
+                  outFields = "*",
+                  returnGeometry = "true",
+                  f = "geojson")
+request <- build_url(url)
+
+
+wb <- read_sf(request)
+
+mapview(gages) + mapview(wb, col.regions='light blue')
+```
+
+### Query trails we used earlier
+This time use the REST service and a query for 'Pacific Crest National Scenic Trail' - bonus add a default topography brackground with it
+```{r}
+url <- parse_url("https://carto.nationalmap.gov/arcgis/rest/services")
+url$path <- paste(url$path, "transportation/MapServer/34/query", sep = "/")
+url$query <- list(where = "Name = 'Pacific Crest National Scenic Trail'",
+                  outFields = "*",
+                  returnGeometry = "true",
+                  f = "json")
+request <- build_url(url)
+
+PCT <- read_sf(request)
+
+mapview(PCT, color='dark green',map.types = "OpenTopoMap")
+```
